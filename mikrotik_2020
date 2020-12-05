@@ -1,0 +1,138 @@
+Interface Configuration
+/ip address add address=192.168.1.3/24 interface=5BB
+/ip address add address=192.168.0.3/24 interface=MyTel
+/ip address add address=192.168.3.1/27 interface=LAN
+
+NATing
+/ip firewall nat add action=masquerade chain=srcnat out-interface=5BB
+/ip firewall nat add action=masquerade chain=srcnat out-interface=MyTel
+
+Address List
+/ip firewall address-list add address=192.168.1.0/24 list=Connected
+/ip firewall address-list add address=192.168.0.0/24 list=Connected
+/ip firewall address-list add address=192.168.3.0/27 list=Connected
+/ip firewall address-list add address=192.168.3.0/27 list=LAN
+
+------------------------------------------
+(LB Method)
+
+/ip route add gateway=192.168.1.1 distance=1 check-gateway=ping comment=5BB_CPE
+/ip route add gateway=192.168.0.1 distance=2 check-gateway=ping comment=MyTel_CPE
+/ip route add gateway=192.168.1.1 routing-mark=5BB_Route distance=1
+/ip route add gateway=192.168.0.1 routing-mark=MyTel_Route distance=1
+
+(PCC Method)
+/ip route add gateway=192.168.1.1 routing-mark=5BB_Route check-gateway=ping 
+/ip route add gateway=192.168.0.1 routing-mark=MyTel_Route check-gateway=ping
+/ip route add gateway=192.168.1.1 routing-mark=5BB_Route check-gateway=ping distance=1
+/ip route add gateway=192.168.0.1 routing-mark=MyTel_Route check-gateway=ping distance=2
+
+(Netwatch)
+/ip route add gateway=192.168.1.1 distance=1 check-gateway=ping comment=5BB_CPE
+/ip route add gateway=192.168.0.1 distance=2 check-gateway=ping comment=MyTel_CPE
+/ip route add gateway=192.168.1.1 distance=1 dst-address=1.1.1.1/32 check-gateway=ping comment="Netwatch CloudflareDNS via 5BB"
+/ip route add gateway=192.168.0.1 distance=1 dst-address=8.8.4.4/32 check-gateway=ping comment="Netwatch GoogleDNS via MyTel"
+
+(Failover using only route tables - check two remote hosts)
+
+1. First we create routes to thoe Hosts via corresponding gateways:
+/ip route add dst-address=1.1.1.1/32 gateway=192.168.1.1 scope=10
+/ip route add dst-address=208.67.220.220/32 gateway=192.168.1.1 scope=10
+/ip route add dst-address=8.8.4.4/32 gateway=192.168.0.1 scope=10
+/ip route add dst-address=208.67.222.222/32 gateway=192.168.0.1 scope=10
+
+2. Create "virtual" hops for those hosts (IP addresses of virual hops arent really important, im using 10.1.1.1 and 10.2.2.2 as example. Target scope is not used in Thailand guide)
+/ip route add dst-address=10.1.1.1 gateway=1.1.1.1 check-gateway=ping scope=10 target=scope=10
+/ip route add dst-address=10.1.1.1 gateway=208.67.220.220 check-gateway=ping scope=10 target=scope=10
+/ip route add dst-address=10.2.2.2 gateway=8.8.4.4 check-gateway=ping scope=10 target=scope=10
+/ip route add dst-address=10.2.2.2 gateway=208.67.222.222 check-gateway=ping scope=10 target=scope=10
+
+3. Add default routes for our clients:
+/ip route add dst-address=0.0.0.0/0 gateway=10.1.1.1 distance=1
+/ip route add dst-address=0.0.0.0/0 gateway=10.2.2.2 distance=2
+/ip route add dst-address=0.0.0.0/0 gateway=10.1.1.1 routing-mark=5BB_Route distance=1 -- added on own. to test with LB
+/ip route add dst-address=0.0.0.0/0 gateway=10.2.2.2 routing-mark=MyTel_Route distance=1 - added on own. to test with LB
+
+------------------------------------------
+Mangle LB Method
+/ip firewall mangle add action=accept chain=prerouting in-interface=LAN src-address-list=Connected dst-address-list=Connected
+
+(PCC Method)
+/ip firewall mangle add action=accept chain=prerouting in-interface=LAN dst-address=192.168.1.0/24
+/ip firewall mangle add action=accept chain=prerouting in-interface=LAN dst-address=192.168.0.0/24
+
+------------------------------------------
+Mark WAN -> Router (LB Method)
+/ip firewall mangle add chain=input connection-mark=no-mark in-interface=5BB action=mark-connection new-connection-mark=5BB->ROS
+/ip firewall mangle add chain=input connection-mark=no-mark in-interface=MyTel action=mark-connection new-connection-mark=MyTel->ROS
+
+(PCC Method)
+/ip firewall mangle add chain=input in-interface=5BB action=mark-connection new-connection-mark=5BB->ROS
+/ip firewall mangle add chain=input in-interface=MyTel action=mark-connection new-connection-mark=5BB->ROS
+
+-------------------------------------------
+Add Marked Connections into respective routes (LB Method)
+
+/ip firewall mangle add chain=output connection-mark=5BB->ROS action=mark-routing new-routing-mark=5BB_Route
+/ip firewall mangle add chain=output connection-mark=MyTel->ROS action=mark-routing new-routing-mark=MyTel_Route
+
+(PCC Method)
+/ip firewall mangle add chain=output connection-mark=5BB->ROS action=mark-routing new-routing-mark=5BB_Route
+/ip firewall mangle add chain=output connection-mark=MyTel->ROS action=mark-routing new-routing-mark=MyTel_Route
+
+-------------------------------------------
+LAN Marking (LB Method)
+
+/ip firewall mangle add chain=forward connection-mark=no-mark in-interface=5BB action=mark-connection new-connection-mark=5BB->LANs
+/ip firewall mangle add chain=forward connection-mark=no-mark in-interface=MyTel action=mark-connection new-connection-mark=MyTel->LANs
+/ip firewall mangle add chain=prerouting connection-mark=5BB->LANs src-address-list=LAN action=mark-routing new-routing-mark=5BB_Route
+/ip firewall mangle add chain=prerouting connection-mark=MyTel->LANs src-address-list=LAN action=mark-routing new-routing-mark=MyTel_Route
+
+-------------------------------------------
+Sticky Connections (LB Method)
+
+/ip firewall mangle add chain=prerouting connection-mark=no-mark src-address-list=LAN dst-address-list=!Connected dst-address-type=!local action=mark-connection new-connection-mark=LAN->WAN
+/ip firewall mangle add chain=prerouting connection-mark=LAN->WAN src-address-list=LAN action=mark-routing new-routing-mark=5BB_Route comment="Load Balancing Here!!!"
+
+/ip firewall mangle add chain=prerouting connection-mark=LAN->WAN routing_mark=5BB_Route action=mark_connection new_connection_mark=Sticky_5BB
+/ip firewall mangle add chain=prerouting connection-mark=LAN->WAN routing_mark=MyTel_Route action=mark_connection new_connection_mark=Sticky_MyTel
+
+/ip firewall mangle add chain=prerouting connection-mark=Sticky_5BB src-address-list=LAN action=mark-routing new-routing-mark=5BB_Route
+/ip firewall mangle add chain=prerouting connection-mark=Sticky_MyTel src-address-list=LAN action=mark-routing new-routing-mark=MyTel_Route
+
+-------------------------------------------
+(PCC Method)
+/ip firewall mangle add chain=prerouting in-interface=LAN per-connection-classifier=both-addresses-and-ports-2/0 dst-address-type=!local action=mark-connection new-connection-mark=5BB->ROS
+/ip firewall mangle add chain=prerouting in-interface=LAN per-connection-classifier=both-addresses-and-ports-2/1 dst-address-type=!local action=mark-connection new-connection-mark=MyTel->ROS
+
+(PCC Method - Only Address)
+/ip firewall mangle add chain=prerouting in-interface=LAN per-connection-classifier=both-addresses:2/0 dst-address-type=!local action=mark-connection new-connection-mark=5BB->ROS
+/ip firewall mangle add chain=prerouting in-interface=LAN per-connection-classifier=both-addresses:2/1 dst-address-type=!local action=mark-connection new-connection-mark=MyTel->ROS
+
+-------------------------------------------
+(Netwatch Script)
+/tool netwatch
+add comment="Monitor 5BB Upstream" down-script="/ip route disable [find commen\
+    t=5BB_CPE]\r\
+    \n/ip firewall mangle set [find comment=\"Load Balancing Here\"] new-routi\
+    ng-mark=MyTel_Route" host=1.1.1.1 interval=5s timeout=1s250ms up-script="/\
+    ip route enable [find comment=5BB_CPE]\r\
+    \n/ip firewall mangle set [find comment=\"Load Balancing Here\"] new-routi\
+    ng-mark=5BB_Route"
+add comment="Monitor MyTel Upstream" down-script="/ip route disable [find comm\
+    ent=MyTel_CPE]\r\
+    \n/ip firewall mangle set [find comment=\"Load Balancing Here\"] new-routi\
+    ng-mark=5BB_Route" host=8.8.4.4 interval=5s timeout=1s250ms up-script=\
+    "/ip route enable [find comment=MyTel_CPE]"
+
+-------------------------------------------
+(Traffic Monitor Script)
+/tool traffic-monitor
+add interface=5BB-ether3 name=LB1 on-event=":log warning \"LB Debug: 5BB Overl\
+    oaded, switching to MyTel\":/ip firewall mangle set [find comment=\"Load B\
+    alancing Here\"] new-routing-mark=MyTel_Route" threshold=20000000 \
+    traffic=received
+add interface=5BB-ether3 name=LB2 on-event=":log warning \"LB Debug: Switching\
+    \_Back to 5BBl\":/ip firewall mangle set [find comment=\"Load Balancing He\
+    re\"] new-routing-mark=5BB_Route" threshold=20000000 traffic=received \
+    trigger=below
